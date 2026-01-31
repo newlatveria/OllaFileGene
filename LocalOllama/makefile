@@ -7,20 +7,18 @@ STREAMLIT = $(VENV)/bin/streamlit
 .PHONY: setup run clean help
 
 help:
-	@echo "Ollama Workstation Commands:"
-	@echo "  make setup     - Create venv and install Streamlit/Requests/Bandit"
-	@echo "  make run       - Start the Secure GUI Dashboard"
-	@echo "  make clean     - Remove venv and temporary workspace files"
+	@echo "Ollama Workstation Master Commands:"
+	@echo "  make setup     - Install Python dependencies (Streamlit, Requests, Bandit)"
+	@echo "  make run       - Launch the complete Integrated Dashboard"
+	@echo "  make clean     - Reset workspace, logs, and virtual environment"
 
 setup:
-	@echo "--- Checking Dependencies ---"
-	@dpkg -s python3-venv >/dev/null 2>&1 || (echo "Error: python3-venv is missing. Run: sudo apt install python3-venv" && exit 1)
-	@echo "--- Initializing Linux Environment ---"
-	rm -rf $(VENV)
+	@echo "--- Initializing System Dependencies ---"
+	@sudo apt update && sudo apt install -y python3-venv git
 	python3 -m venv $(VENV)
 	$(PIP) install --upgrade pip
 	$(PIP) install streamlit requests bandit
-	mkdir -p workspace
+	mkdir -p workspace/logs
 	@if [ ! -d ".git" ]; then git init; fi
 	@echo "Setup complete. Launch with 'make run'"
 
@@ -31,4 +29,4 @@ run:
 clean:
 	rm -rf $(VENV)
 	rm -rf workspace/*
-	find . -type d -name "__pycache__" -exec rm -rf {} +
+	@echo "Project workspace and environment reset."
