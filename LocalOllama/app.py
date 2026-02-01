@@ -144,25 +144,81 @@ with t_chat:
                 except Exception as e:
                     st.error(f"Memory Connection Error: {e}")
 
+    # Right Column: The "IDE" and Filesystem Management
     with col_exec:
-        st.subheader("⚡ Workbench")
-        up_files = st.file_uploader("Context Files", accept_multiple_files=True)
+        st.subheader("🛠️ Project IDE")
         
-        # This text area now updates automatically when the AI responds
-        code_editor = st.text_area("Code Editor", value=st.session_state["latest_code"], height=350)
+        # 1. Workspace Navigation
+        files = [f for f in os.listdir(WORKSPACE) if os.path.isfile(os.path.join(WORKSPACE, f))]
+        
+        col_nav, col_path = st.columns([1, 2])
+        with col_nav:
+            selected_file = st.selectbox("📁 Browse Workspace", ["Select a file..."] + files)
+        
+        with col_path:
+            if selected_file != "Select a file...":
+                abs_path = os.path.abspath(os.path.join(WORKSPACE, selected_file))
+                st.caption(f"📍 Location: `{abs_path}`")
+                
+                # CRUD: Read - Load file into editor if selected
+                if st.button("📖 Load into Editor"):
+                    with open(os.path.join(WORKSPACE, selected_file), "r") as f:
+                        st.session_state["latest_code"] = f.read()
+                        st.rerun()
+
+        st.divider()
+
+        # 2. Code Editor (The IDE)
+        # CRUD: Create/Update - Editor handles the content
+        code_editor = st.text_area("Code Editor", 
+                                  value=st.session_state["latest_code"], 
+                                  height=400, 
+                                  help="Edit your code here. Use the 'Save' button to write to the filesystem.")
         st.session_state["latest_code"] = code_editor
         
-        save_name = st.text_input("Save as:", value="generated_script.py")
+        # Ensure filenames are appropriate (stripping dangerous paths)
+        suggested_name = "script.py"
+        if st.session_state["latest_code"].startswith("#"): # Basic check for AI comments
+            first_line = st.session_state["latest_code"].split('\n')[0]
+            if ".py" in first_line or ".sh" in first_line:
+                suggested_name = first_line.replace("#", "").strip()
+
+        save_name = st.text_input("💾 Filename:", value=suggested_name)
         
-        c1, c2, c3 = st.columns(3)
-        if c1.button("💾 Save"):
-            with open(os.path.join(WORKSPACE, save_name), "w") as f: f.write(code_editor)
-            st.success("Saved.")
-        if c2.button("🔍 Scan"):
-            st.text_area("Audit Report", value=run_shell(["venv/bin/bandit", "-r", os.path.join(WORKSPACE, save_name)]))
-        if c3.button("▶️ Run"):
-            if any(t in code_editor for t in DANGEROUS_TOKENS): st.error("Dangerous code blocked.")
-            else: st.code(run_shell(["python3", os.path.join(WORKSPACE, save_name)]))
+        # CRUD: Action Buttons
+        c1, c2, c3, c4 = st.columns(4)
+        
+        if c1.button("💾 Save", use_container_width=True):
+            clean_name = os.path.basename(save_name) # Security: prevent path traversal
+            file_path = os.path.join(WORKSPACE, clean_name)
+            with open(file_path, "w") as f:
+                f.write(code_editor)
+            st.toast(f"Saved: {file_path}", icon="✅")
+            st.rerun()
+
+        if c2.button("🔍 Audit", use_container_width=True):
+            path = os.path.join(WORKSPACE, save_name)
+            if os.path.exists(path):
+                st.code(run_shell(["venv/bin/bandit", "-r", path]))
+            else:
+                st.warning("Save the file first to audit.")
+
+        if c3.button("▶️ Run", use_container_width=True):
+            if any(t in code_editor for t in DANGEROUS_TOKENS):
+                st.error("Operation Blocked: Code contains prohibited system commands.")
+            else:
+                path = os.path.join(WORKSPACE, save_name)
+                # Ensure file is saved before running
+                with open(path, "w") as f: f.write(code_editor)
+                st.code(run_shell(["python3", path]))
+
+        # CRUD: Delete
+        if c4.button("🗑️ Delete", type="secondary", use_container_width=True):
+            if selected_file != "Select a file...":
+                os.remove(os.path.join(WORKSPACE, selected_file))
+                st.warning(f"Deleted {selected_file}")
+                st.rerun()
+                
 # --- TAB 2: MODEL FACTORY & EXPORTER ---
 with t_factory:
     st.header("🏭 Personality Factory")
