@@ -21,6 +21,7 @@ model_name = st.sidebar.text_input("MODEL_NAME", value="security-bot")
 api_url = st.sidebar.text_input("OLLAMA_API_URL", value="http://localhost:11434/api/generate")
 temp = st.sidebar.slider("Temperature (Creativity)", 0.0, 1.0, 0.2)
 num_ctx = st.sidebar.select_slider("Context Window", options=[2048, 4096, 8192, 16384], value=8192)
+api_url = st.sidebar.text_input("Ollama URL", value="http://localhost:11434/api/generate")
 
 # --- Shared Logic ---
 def run_shell(cmd_list):
@@ -139,3 +140,56 @@ with t_logs:
             st.rerun()
     else:
         st.info("No logs detected. Ensure your Cron jobs are running and redirecting output.")
+
+        # --- Model Management Tab ---
+with st.sidebar:
+    st.divider()
+    st.subheader("🛠️ Model Management")
+    if st.button("📋 Refresh Model List"):
+        st.rerun()
+
+# --- TAB 6: MODEL FACTORY ---
+def get_ollama_models():
+    res = subprocess.run(["ollama", "list"], capture_output=True, text=True)
+    return res.stdout
+
+with st.expander("🏭 Model Factory: Create & Manage Personalities"):
+    st.info("Define a Modelfile to create a specialized AI agent.")
+    
+    col_m1, col_m2 = st.columns(2)
+    
+    with col_m1:
+        st.subheader("1. Create New Model")
+        new_model_name = st.text_input("New Model Name", placeholder="e.g., linux-expert")
+        base_model = st.selectbox("Base Model", ["llama3", "mistral", "codellama", "phi3"])
+        
+        system_prompt = st.text_area("System Prompt (Personality)", 
+            value="You are a professional Linux administrator. Always suggest efficient, one-line bash commands and prioritize security.",
+            height=200)
+        
+        # Example Modelfile template
+        modelfile_content = f"FROM {base_model}\nSYSTEM \"{system_prompt}\"\nPARAMETER temperature {temp}"
+        
+        if st.button("🔨 Build Model"):
+            with open("temp_modelfile", "w") as f:
+                f.write(modelfile_content)
+            
+            with st.spinner(f"Building {new_model_name}..."):
+                res = subprocess.run(["ollama", "create", new_model_name, "-f", "temp_modelfile"], 
+                                     capture_output=True, text=True)
+                if res.returncode == 0:
+                    st.success(f"Model '{new_model_name}' created successfully!")
+                else:
+                    st.error(f"Error: {res.stderr}")
+
+    with col_m2:
+        st.subheader("2. Manage Existing Models")
+        st.text("Current Models:")
+        st.code(get_ollama_models(), language="text")
+        
+        delete_target = st.text_input("Model to Delete", placeholder="name_of_model")
+        if st.button("🗑️ Delete Model", type="primary"):
+            if delete_target:
+                res = subprocess.run(["ollama", "rm", delete_target], capture_output=True, text=True)
+                st.warning(f"Deleted: {delete_target}")
+                st.rerun()
