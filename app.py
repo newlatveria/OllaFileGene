@@ -3,281 +3,244 @@ import requests
 import json
 import subprocess
 import os
-import re
+import sys
+import time
+from datetime import datetime
 
-# --- 1. CORE SYSTEM & SECURITY INITIALIZATION ---
+# --- 1. STARTUP & SELF-HEALING (INTEL ARC SUPPORT) ---
+def startup_check():
+    """Ensures dependencies are installed in the active VENV."""
+    required = ["psutil", "py-cpuinfo", "black", "pylint", "bandit"]
+    for lib in required:
+        try:
+            __import__(lib if lib != "py-cpuinfo" else "cpuinfo")
+        except ImportError:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", lib])
+
+startup_check()
+import psutil
+import cpuinfo
+
+# --- 2. INTEL ARC GPU MONITORING LOGIC ---
+def get_gpu_stats():
+    """Reads Intel Arc A770 metrics from Linux sysfs."""
+    gpu = {"name": "Intel Arc A770", "vram_used": 0, "vram_total": 0, "detected": False}
+    try:
+        # Check if Intel DRM drivers are active
+        if os.path.exists("/sys/class/drm/card0/device/mem_info_vram_total"):
+            with open("/sys/class/drm/card0/device/mem_info_vram_total", "r") as f:
+                gpu["vram_total"] = int(f.read()) // (1024**2)
+            with open("/sys/class/drm/card0/device/mem_info_vram_used", "r") as f:
+                gpu["vram_used"] = int(f.read()) // (1024**2)
+            gpu["detected"] = True
+        else:
+            # Fallback check via lspci
+            lspci = subprocess.check_output("lspci | grep -i 'VGA |Display'", shell=True).decode()
+            if "Intel" in lspci:
+                gpu["detected"] = True
+    except:
+        pass
+    return gpu
+
+# --- 3. CORE SETUP & PERSISTENCE ---
 WORKSPACE = "workspace"
 LOG_DIR = os.path.join(WORKSPACE, "logs")
-DANGEROUS_TOKENS = ["rm -rf /", "sudo ", "chmod 777", "mkfs", "dd ", ":(){", "shutdown", "reboot", "> /etc/"]
-# Patterns to clean up "Token Soup" and training leaks
-FORBIDDEN_PATTERNS = [r"<\|.*?\|>", r"fim_suffix", r"fim_middle", r"NSCoder", r"onBindViewHolder"]
+ARCHIVE_DIR = os.path.join(WORKSPACE, ".archive")
+SESSION_FILE = "session_metadata.json"
+DANGEROUS_TOKENS = ["rm -rf /", "sudo ", "chmod 777", "mkfs", "dd ", ":(){", "shutdown", "> /etc/"]
 
-for path in [WORKSPACE, LOG_DIR]:
-    if not os.path.exists(path):
-        os.makedirs(path)
+for path in [WORKSPACE, LOG_DIR, ARCHIVE_DIR]:
+    if not os.path.exists(path): os.makedirs(path)
 
-st.set_page_config(page_title="Ollama Master Workstation", layout="wide")
+st.set_page_config(page_title="Ollama MasterStation Pro", layout="wide", page_icon="🚀")
 
-# --- 2. SESSION PERSISTENCE ---
-if "messages" not in st.session_state:
-    st.session_state["messages"] = []
-if "latest_code" not in st.session_state:
-    st.session_state["latest_code"] = ""
-if "cron_draft" not in st.session_state:
-    st.session_state["cron_draft"] = ""
+def save_session():
+    data = {
+        "messages": st.session_state.get("messages", []),
+        "latest_code": st.session_state.get("latest_code", ""),
+        "terminal_output": st.session_state.get("terminal_output", ""),
+        "settings": {
+            "temp": st.session_state.get("temp", 0.2),
+            "num_ctx": st.session_state.get("num_ctx", 8192)
+        }
+    }
+    with open(SESSION_FILE, "w") as f:
+        json.dump(data, f, indent=4)
 
-# --- 3. HELPER LOGIC ---
-def sanitize_output(text):
-    for pattern in FORBIDDEN_PATTERNS:
-        text = re.sub(pattern, "[CLEANED]", text)
-    return text
+def load_session():
+    if os.path.exists(SESSION_FILE):
+        try:
+            with open(SESSION_FILE, "r") as f: return json.load(f)
+        except: return {}
+    return {}
 
-def get_installed_models(base_url):
-    try:
-        response = requests.get(f"{base_url.rstrip('/')}/api/tags", timeout=2)
-        if response.status_code == 200:
-            return [m["name"] for m in response.json().get("models", [])], True
-    except:
-        return [], False
-    return [], False
+# --- 4. STATE INITIALIZATION ---
+if "init" not in st.session_state:
+    saved = load_session()
+    st.session_state["messages"] = saved.get("messages", [])
+    st.session_state["latest_code"] = saved.get("latest_code", "")
+    st.session_state["terminal_output"] = saved.get("terminal_output", "System Ready.")
+    st.session_state["temp"] = saved.get("settings", {}).get("temp", 0.2)
+    st.session_state["num_ctx"] = saved.get("settings", {}).get("num_ctx", 8192)
+    st.session_state["editor_key"] = 0
+    st.session_state["last_autosave"] = time.time()
+    st.session_state["init"] = True
 
 def run_shell(cmd_list):
     try:
-        res = subprocess.run(cmd_list, capture_output=True, text=True, timeout=20)
-        return res.stdout + res.stderr
-    except Exception as e:
-        return f"Execution Error: {str(e)}"
+        res = subprocess.run(cmd_list, capture_output=True, text=True, timeout=30)
+        out = f"--- Result: {' '.join(cmd_list)} ---\n{res.stdout}{res.stderr}"
+        st.session_state["terminal_output"] = out
+        return out
+    except Exception as e: return str(e)
 
-# --- 4. SIDEBAR: GLOBAL CONTROLS & MODEL SELECTION ---
+# --- 5. SIDEBAR ---
 with st.sidebar:
-    st.title("🎮 System Controls")
-    api_url = st.text_input("Ollama API URL", value="http://localhost:11434")
+    st.title("🛡️ Station Control")
     
-    models, is_online = get_installed_models(api_url)
-    if is_online:
-        st.success("🟢 Ollama Online")
-        model_name = st.selectbox("Select Model", models)
-    else:
-        st.error("🔴 Ollama Offline")
-        model_name = st.text_input("Model Name (Manual)", value="llama3")
+    with st.expander("📊 Live Hardware (Intel Arc)", expanded=True):
+        cpu_p = psutil.cpu_percent()
+        ram_p = psutil.virtual_memory().percent
+        st.write(f"**CPU:** {cpu_p}% | **RAM:** {ram_p}%")
+        st.progress(cpu_p / 100)
+        
+        gpu = get_gpu_stats()
+        if gpu["detected"]:
+            st.divider()
+            st.write(f"**GPU:** {gpu['name']}")
+            if gpu["vram_total"] > 0:
+                v_use = min(gpu["vram_used"] / gpu["vram_total"], 1.0)
+                st.write(f"VRAM: {gpu['vram_used']}MB / {gpu['vram_total']}MB")
+                st.progress(v_use)
+        else:
+            st.warning("Intel Arc A770 monitoring restricted.")
 
     st.divider()
-    st.subheader("⚙️ Hyperparameters")
-    temp = st.slider("Temperature", 0.0, 1.0, 0.2)
-    num_ctx = st.select_slider("Context Window", options=[2048, 4096, 8192, 16384, 32768], value=8192)
-    
-    st.divider()
-    if st.button("🔥 HARD RESET SESSION", type="primary", use_container_width=True):
-        st.session_state.clear()
-        st.rerun()
-    
-    if st.button("🗑️ Clear Chat History", use_container_width=True):
-        st.session_state["messages"] = []
-        st.rerun()
+    api_url = st.text_input("Ollama URL", value="http://localhost:11434")
+    try:
+        r = requests.get(f"{api_url}/api/tags", timeout=2)
+        models = [m["name"] for m in r.json().get("models", [])]
+        model_name = st.selectbox("Active Brain", models)
+    except:
+        model_name = st.text_input("Manual Model", "llama3")
 
-# --- 5. TABBED INTERFACE ---
-t_chat, t_factory, t_auto, t_sec_git, t_logs, t_help = st.tabs([
-    "💬 Chat & Code", "🏭 Model Factory", "🕒 Automation", "🌿 Security & Git", "📜 Logs", "❓ Help Center"
+    st.session_state["temp"] = st.slider("Temperature", 0.0, 1.0, st.session_state["temp"])
+    st.session_state["num_ctx"] = st.select_slider("Context", [2048, 4096, 8192, 16384, 32768], st.session_state["num_ctx"])
+
+# --- 6. TABS DEFINITION ---
+t_chat, t_ide, t_history, t_sess, t_factory, t_auto, t_sec, t_logs = st.tabs([
+    "💬 Chat", "🛠️ IDE", "📜 Versions", "💾 Session", "🏭 Factory", "🕒 Auto", "🛡️ Sec", "📑 Logs"
 ])
 
-# --- TAB 1: CHAT & CODE LAB (WITH PERSISTENT MEMORY) ---
+# --- TAB 1: CHAT ---
 with t_chat:
-    col_chat, col_exec = st.columns([1, 1])
+    chat_up = st.file_uploader("📎 Context", accept_multiple_files=True)
+    for msg in st.session_state["messages"]:
+        with st.chat_message(msg["role"]): st.markdown(msg["content"])
     
-    with col_chat:
-        st.subheader("Interactive Session (Context Aware)")
+    if prompt := st.chat_input("Ask for code..."):
+        f_ctx = ""
+        if chat_up:
+            for f in chat_up: f_ctx += f"\nFILE: {f.name}\n{f.getvalue().decode('utf-8')}\n"
+        st.session_state["messages"].append({"role": "user", "content": prompt})
+        with st.chat_message("user"): st.markdown(prompt)
         
-        # Display the chat history stored in session_state
-        for msg in st.session_state["messages"]:
-            with st.chat_message(msg["role"]):
-                st.markdown(msg["content"])
-        
-        # Chat Input
-        if prompt := st.chat_input("Ask a follow-up question or start a new task..."):
-            # 1. Store user message in memory
-            st.session_state["messages"].append({"role": "user", "content": prompt})
-            with st.chat_message("user"):
-                st.markdown(prompt)
+        with st.chat_message("assistant"):
+            resp = st.empty(); full = ""
+            payload = {"model": model_name, "messages": st.session_state["messages"][:-1] + [{"role": "user", "content": f"{f_ctx}\n{prompt}"}], "options": {"temperature": st.session_state["temp"], "num_ctx": st.session_state["num_ctx"]}, "stream": True}
+            r = requests.post(f"{api_url}/api/chat", json=payload, stream=True)
+            for line in r.iter_lines():
+                if line:
+                    chunk = json.loads(line.decode('utf-8'))
+                    content = chunk.get("message", {}).get("content", "")
+                    full += content
+                    resp.markdown(full + "▌")
+            resp.markdown(full)
+            st.session_state["messages"].append({"role": "assistant", "content": full})
+            if "```" in full:
+                st.session_state["latest_code"] = full.split("```")[1].split("\n", 1)[-1].split("```")[0]
+                st.session_state["editor_key"] += 1
+            save_session()
+
+# --- TAB 2: IDE ---
+with t_ide:
+    files = sorted([f for f in os.listdir(WORKSPACE) if os.path.isfile(os.path.join(WORKSPACE, f))])
+    sel_file = st.selectbox("📁 Project Files", ["(New)"] + files)
+    
+    if st.button("📖 Load"):
+        with open(os.path.join(WORKSPACE, sel_file), "r") as f:
+            st.session_state["latest_code"] = f.read()
+            st.session_state["editor_key"] += 1; st.rerun()
             
-            with st.chat_message("assistant"):
-                msg_placeholder = st.empty()
-                full_resp = ""
-                
-                # 2. Update to the CHAT endpoint for conversation memory
-                chat_url = f"{api_url.rstrip('/')}/api/chat"
-                
-                # 3. Pass the ENTIRE messages list to Ollama
-                payload = {
-                    "model": model_name,
-                    "messages": st.session_state["messages"],
-                    "stream": True,
-                    "options": {"temperature": temp, "num_ctx": num_ctx}
-                }
-                
-                try:
-                    r = requests.post(chat_url, json=payload, stream=True)
-                    for line in r.iter_lines():
-                        if line:
-                            chunk = json.loads(line.decode('utf-8'))
-                            # Note: The 'chat' endpoint returns 'message' -> 'content'
-                            chunk_content = chunk.get("message", {}).get("content", "")
-                            content = sanitize_output(chunk_content)
-                            full_resp += content
-                            msg_placeholder.markdown(full_resp + "▌")
-                    
-                    msg_placeholder.markdown(full_resp)
-                    
-                    # 4. Store assistant response in memory
-                    st.session_state["messages"].append({"role": "assistant", "content": full_resp})
-                    
-                    # 5. Extract Code to Workbench
-                    if "```" in full_resp:
-                        blocks = full_resp.split("```")
-                        if len(blocks) > 1:
-                            raw_code = blocks[1]
-                            if raw_code.startswith("python"): raw_code = raw_code[6:]
-                            elif raw_code.startswith("bash"): raw_code = raw_code[4:]
-                            st.session_state["latest_code"] = raw_code.strip()
-                            # Force a rerun to update the Code Editor in the right column
-                            st.rerun()
+    code = st.text_area("Source", value=st.session_state["latest_code"], height=300, key=f"ed_{st.session_state['editor_key']}")
+    st.session_state["latest_code"] = code
+    fname = st.text_input("Filename", value=sel_file if sel_file != "(New)" else "script.py")
+    
+    a1, a2, a3 = st.columns(3)
+    if a1.button("💾 Save"):
+        with open(os.path.join(WORKSPACE, fname), "w") as f: f.write(code)
+        save_session(); st.toast("Saved!")
+    if a2.button("✨ Format"):
+        run_shell(["black", os.path.join(WORKSPACE, fname)]); st.rerun()
+    if a3.button("▶️ Run"):
+        if not any(t in code for t in DANGEROUS_TOKENS):
+            run_shell(["python3", os.path.join(WORKSPACE, fname)]); st.rerun()
 
-                except Exception as e:
-                    st.error(f"Memory Connection Error: {e}")
+    st.code(st.session_state["terminal_output"])
 
-    # Right Column: The "IDE" and Filesystem Management
-    with col_exec:
-        st.subheader("🛠️ Project IDE")
-        
-        # 1. Workspace Navigation
-        files = [f for f in os.listdir(WORKSPACE) if os.path.isfile(os.path.join(WORKSPACE, f))]
-        
-        col_nav, col_path = st.columns([1, 2])
-        with col_nav:
-            selected_file = st.selectbox("📁 Browse Workspace", ["Select a file..."] + files)
-        
-        with col_path:
-            if selected_file != "Select a file...":
-                abs_path = os.path.abspath(os.path.join(WORKSPACE, selected_file))
-                st.caption(f"📍 Location: `{abs_path}`")
-                
-                # CRUD: Read - Load file into editor if selected
-                if st.button("📖 Load into Editor"):
-                    with open(os.path.join(WORKSPACE, selected_file), "r") as f:
-                        st.session_state["latest_code"] = f.read()
-                        st.rerun()
+# --- TAB 3: VERSIONS ---
+with t_history:
+    archived = sorted(os.listdir(ARCHIVE_DIR), reverse=True)
+    if archived:
+        v = st.selectbox("Backups", archived)
+        with open(os.path.join(ARCHIVE_DIR, v)) as f: st.code(f.read())
 
-        st.divider()
-
-        # 2. Code Editor (The IDE)
-        # CRUD: Create/Update - Editor handles the content
-        code_editor = st.text_area("Code Editor", 
-                                  value=st.session_state["latest_code"], 
-                                  height=400, 
-                                  help="Edit your code here. Use the 'Save' button to write to the filesystem.")
-        st.session_state["latest_code"] = code_editor
-        
-        # Ensure filenames are appropriate (stripping dangerous paths)
-        suggested_name = "script.py"
-        if st.session_state["latest_code"].startswith("#"): # Basic check for AI comments
-            first_line = st.session_state["latest_code"].split('\n')[0]
-            if ".py" in first_line or ".sh" in first_line:
-                suggested_name = first_line.replace("#", "").strip()
-
-        save_name = st.text_input("💾 Filename:", value=suggested_name)
-        
-        # CRUD: Action Buttons
-        c1, c2, c3, c4 = st.columns(4)
-        
-        if c1.button("💾 Save", use_container_width=True):
-            clean_name = os.path.basename(save_name) # Security: prevent path traversal
-            file_path = os.path.join(WORKSPACE, clean_name)
-            with open(file_path, "w") as f:
-                f.write(code_editor)
-            st.toast(f"Saved: {file_path}", icon="✅")
+# --- TAB 4: SESSION & SYSTEM MANAGER ---
+with t_sess:
+    st.header("💾 Session Command Center")
+    c_s1, c_s2 = st.columns(2)
+    with c_s1:
+        if st.button("💾 Manual Save"): save_session(); st.success("Synced!")
+        if st.button("🔥 Factory Reset", type="primary"):
+            if os.path.exists(SESSION_FILE): os.remove(SESSION_FILE)
+            st.session_state.clear(); st.rerun()
+    with c_s2:
+        if st.button("🛰️ Git Sync"): run_shell(["make", "git-sync"]); st.success("Pushed!")
+        if st.button("♻️ Repair Intel Monitor"):
+            subprocess.run(["sudo", "apt", "install", "-y", "intel-gpu-tools"])
             st.rerun()
+    
+    st.divider()
+    st.subheader("📊 Telemetry")
+    st.metric("Active Model", model_name)
+    st.metric("GPU Detected", "Intel Arc A770" if gpu["detected"] else "No")
 
-        if c2.button("🔍 Audit", use_container_width=True):
-            path = os.path.join(WORKSPACE, save_name)
-            if os.path.exists(path):
-                st.code(run_shell(["venv/bin/bandit", "-r", path]))
-            else:
-                st.warning("Save the file first to audit.")
-
-        if c3.button("▶️ Run", use_container_width=True):
-            if any(t in code_editor for t in DANGEROUS_TOKENS):
-                st.error("Operation Blocked: Code contains prohibited system commands.")
-            else:
-                path = os.path.join(WORKSPACE, save_name)
-                # Ensure file is saved before running
-                with open(path, "w") as f: f.write(code_editor)
-                st.code(run_shell(["python3", path]))
-
-        # CRUD: Delete
-        if c4.button("🗑️ Delete", type="secondary", use_container_width=True):
-            if selected_file != "Select a file...":
-                os.remove(os.path.join(WORKSPACE, selected_file))
-                st.warning(f"Deleted {selected_file}")
-                st.rerun()
-                
-# --- TAB 2: MODEL FACTORY & EXPORTER ---
+# --- TAB 5: FACTORY ---
 with t_factory:
-    st.header("🏭 Personality Factory")
-    col_f1, col_f2 = st.columns(2)
-    with col_f1:
-        st.subheader("Build Personality")
-        m_b_name = st.text_input("Model Name (e.g., bash-expert)")
-        m_base = st.selectbox("Base Model", models if is_online else ["llama3"])
-        m_sys = st.text_area("System Prompt", "You are a Linux guru.")
-        if st.button("🔨 Build"):
-            with open("Modelfile", "w") as f: f.write(f"FROM {m_base}\nSYSTEM \"{m_sys}\"")
-            st.info(run_shell(["ollama", "create", m_b_name, "-f", "Modelfile"]))
-    with col_f2:
-        st.subheader("Export Script")
-        ex_name = st.selectbox("Model to Export", models if is_online else [])
-        if st.button("📦 Create Installer"):
-            sh_c = f"#!/bin/bash\nollama pull {m_base}\necho \"FROM {m_base}\nSYSTEM \\\"{m_sys}\\\"\" > Modelfile\nollama create {ex_name} -f Modelfile\nrm Modelfile"
-            st.download_button("Download .sh", sh_c, file_name=f"install_{ex_name}.sh")
+    st.subheader("🏭 Model Management")
+    new_m = st.text_input("Pull Model (e.g., deepseek-coder)")
+    if st.button("🚀 Download"):
+        with st.status("Downloading..."): run_shell(["ollama", "pull", new_m])
 
-# --- TAB 3: AUTOMATION ---
+# --- TAB 6: AUTOMATION ---
 with t_auto:
-    st.header("🕒 Task Scheduler")
-    cron_req = st.text_input("Cron Task Description")
-    if st.button("Draft Cron"):
-        log_p = os.path.abspath(os.path.join(LOG_DIR, "cron.log"))
-        p = f"Convert to crontab: '{cron_req}'. Log to >> {log_p} 2>&1"
-        res = requests.post(f"{api_url}/api/generate", json={"model": model_name, "prompt": p, "stream": False}).json()
-        st.session_state['cron_draft'] = res.get("response", "").strip()
-    if 'cron_draft' in st.session_state:
-        st.code(st.session_state['cron_draft'])
-        if st.button("✅ Activate"):
-            exist = run_shell(["crontab", "-l"])
-            with open("c.tmp", "w") as f: f.write(exist + "\n" + st.session_state['cron_draft'])
-            subprocess.run(["crontab", "c.tmp"])
-            st.success("Active.")
+    st.subheader("🕒 Cron Generator")
+    c_p = st.text_input("Schedule Task Description")
+    if st.button("🪄 Generate"):
+        res = requests.post(f"{api_url}/api/generate", json={"model": model_name, "prompt": f"Crontab line for: {c_p}", "stream": False}).json()
+        st.code(res.get("response", ""))
 
-# --- TAB 4: SECURITY & GIT ---
-with t_sec_git:
-    col_g1, col_g2 = st.columns(2)
-    with col_g1:
-        st.subheader("Git Control")
-        branch = st.text_input("Branch", "ai-update")
-        msg = st.text_input("Message", "Code update")
-        if st.button("Push"):
-            run_shell(["git", "checkout", "-b", branch])
-            run_shell(["git", "add", "."])
-            st.info(run_shell(["git", "commit", "-m", msg]))
-    with col_g2:
-        st.subheader("Full Scan")
-        if st.button("Scan Workspace"): st.code(run_shell(["venv/bin/bandit", "-r", WORKSPACE]))
+# --- TAB 7: SECURITY ---
+with t_sec:
+    if st.button("🔍 Scan for Vulnerabilities"):
+        st.code(run_shell(["bandit", "-r", WORKSPACE]))
 
-# --- TAB 5: LOGS ---
+# --- TAB 8: LOGS ---
 with t_logs:
-    logs = [f for f in os.listdir(LOG_DIR) if f.endswith(".log")]
+    if st.button("🛠️ Diagnostic Check"):
+        st.write(f"VENV Path: {sys.executable}")
+        st.write(f"GPU Support: {gpu}")
+    logs = os.listdir(LOG_DIR)
     if logs:
-        sel = st.selectbox("View Log", logs)
-        with open(os.path.join(LOG_DIR, sel)) as f: st.code("".join(f.readlines()[-100:]))
-    else: st.info("No logs.")
-
-# --- TAB 6: HELP ---
-with t_help:
-    st.markdown("### Guide\n1. Use **Chat** to build code.\n2. **Save & Run** in Workbench.\n3. **Factory** for new models.\n4. **Reset** sidebar if soup occurs.")
+        s = st.selectbox("Logs", logs)
+        with open(os.path.join(LOG_DIR, s)) as f: st.code(f.read())
