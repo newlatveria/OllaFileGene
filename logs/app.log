@@ -1,0 +1,2 @@
+2026-02-15 22:49:02,804 - __main__ - ERROR - Error in chat: HTTPConnectionPool(host='localhost', port=11434): Read timed out. (read timeout=120)
+2026-02-15 22:51:36,991 - __main__ - ERROR - Error in chat: HTTPConnectionPool(host='localhost', port=11434): Read timed out. (read timeout=120)

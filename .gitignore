@@ -1,7 +1,0 @@
-__pycache__/
-*.pyc
-.archive/
-session_metadata.json
-venv/
-.env
-workspace/

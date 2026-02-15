@@ -1,4 +1,0 @@
-make setup
-
-make run
-

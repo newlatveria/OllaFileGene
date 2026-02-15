@@ -1,8 +1,0 @@
-streamlit
-psutil
-py-cpuinfo
-requests
-black
-pylint
-bandit
-python-dotenv
