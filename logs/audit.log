@@ -1,5 +1,0 @@
-2026-02-15T22:30:28.263981 | admin | LOGIN_SUCCESS | SUCCESS | Role: admin
-2026-02-15T22:42:52.186233 | admin | LOGIN_SUCCESS | SUCCESS | Role: admin
-2026-02-15T22:46:29.415571 | admin | LOGIN_SUCCESS | SUCCESS | Role: admin
-2026-02-15T22:49:02.805063 | admin | CHAT_ERROR | FAILURE | Model: llama3.2:latest
-2026-02-15T22:51:00.888898 | admin | CHAT_MESSAGE | SUCCESS | Model: tinyllama:latest
