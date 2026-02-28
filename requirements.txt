@@ -1,0 +1,14 @@
+# Secure LLM Model Factory - Complete Edition Requirements
+# Python 3.8+ required
+
+# Core Dependencies - REQUIRED
+streamlit>=1.28.0
+requests>=2.31.0
+
+# Hardware Monitoring - REQUIRED for Complete Edition
+psutil>=5.9.0
+
+# Optional but recommended
+# python-dotenv>=1.0.0    # Environment variables
+# gunicorn>=21.2.0        # Production server
+# watchdog>=3.0.0         # File monitoring
